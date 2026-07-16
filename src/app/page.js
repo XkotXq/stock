@@ -613,7 +613,6 @@ export default function Home() {
 		if (entry.location) setLastLocation(entry.location);
 
 		const mat = sheetMaterial;
-		const hadSelection = Boolean(selectedIds[mat]);
 		setStocks((prev) => {
 			const list = prev[mat] ?? [];
 			const selId = selectedIds[mat];
@@ -623,11 +622,9 @@ export default function Home() {
 			next.splice(idx, 0, entry);
 			return { ...prev, [mat]: next };
 		});
-		if (hadSelection) {
-			setSelectedIds((prev) => ({ ...prev, [mat]: newId }));
-			if (mat === "frp") requestAnimationFrame(() => scrollRowIntoView(newId));
-		}
+		setSelectedIds((prev) => ({ ...prev, [mat]: newId }));
 		closeSheet();
+		requestAnimationFrame(() => scrollRowIntoView(newId));
 	}
 
 	function handleEdit() {
@@ -648,7 +645,7 @@ export default function Home() {
 		}));
 		setSelectedIds((prev) => ({ ...prev, [mat]: id }));
 		closeSheet();
-		if (mat === "frp") requestAnimationFrame(() => scrollRowIntoView(id));
+		requestAnimationFrame(() => scrollRowIntoView(id));
 	}
 
 	function handleTransfer() {
@@ -682,7 +679,7 @@ export default function Home() {
 		if (updated.location) setLastLocation(updated.location);
 		setSelectedIds((prev) => ({ ...prev, [mat]: srcItem.id }));
 		closeSheet();
-		if (mat === "frp") requestAnimationFrame(() => scrollRowIntoView(srcItem.id));
+		requestAnimationFrame(() => scrollRowIntoView(srcItem.id));
 	}
 
 	function deleteItem() {
@@ -711,7 +708,10 @@ export default function Home() {
 		setStatusMap((prev) => ({ ...prev, [mat]: { ...prev[mat], [id]: value } }));
 		const idx = activeItems.findIndex((i) => i.id === id);
 		const next = activeItems[idx + 1] ?? activeItems[0] ?? null;
-		if (next) setSelectedIds((prev) => ({ ...prev, [mat]: next.id }));
+		if (next) {
+			setSelectedIds((prev) => ({ ...prev, [mat]: next.id }));
+			requestAnimationFrame(() => scrollRowIntoView(next.id));
+		}
 	}
 
 	function startNewStock() {
@@ -936,21 +936,23 @@ export default function Home() {
 
 
 	function handleDragStart(event) {
+		if (!activeMaterial) return;
 		setActiveDragId(event.active.id);
-		setSelectedIds((prev) => ({ ...prev, frp: event.active.id }));
+		setSelectedIds((prev) => ({ ...prev, [activeMaterial]: event.active.id }));
 	}
 	function handleDragCancel() { setActiveDragId(null); }
 	function handleDragEnd(event) {
 		const { active, over } = event;
 		setActiveDragId(null);
-		if (!over || active.id === over.id) return;
-		const list = stocks.frp;
+		if (!activeMaterial || !over || active.id === over.id) return;
+		const mat = activeMaterial;
+		const list = stocks[mat];
 		const oldIdx = list.findIndex((i) => i.id === active.id);
 		const newIdx = list.findIndex((i) => i.id === over.id);
 		if (oldIdx < 0 || newIdx < 0) return;
 		const next = arrayMove(list, oldIdx, newIdx);
-		setStocks((prev) => ({ ...prev, frp: next }));
-		setSelectedIds((prev) => ({ ...prev, frp: active.id }));
+		setStocks((prev) => ({ ...prev, [mat]: next }));
+		setSelectedIds((prev) => ({ ...prev, [mat]: active.id }));
 		requestAnimationFrame(() => scrollRowIntoView(active.id));
 	}
 
@@ -985,7 +987,7 @@ export default function Home() {
 
 	function formatItemNumber(value) {
 		const text = String(value ?? "");
-		if (!text || !frpMasked) return text;
+		if (!text || (!frpMasked && itemIdDisplayMode !== "short")) return text;
 		return text.length <= 3 ? text : text.slice(-3);
 	}
 
@@ -1016,9 +1018,9 @@ export default function Home() {
 			<button
 				type="button"
 				onClick={() => onChange(!value)}
-				className={`relative h-7 w-12 rounded-full transition-colors ${value ? "bg-blue-600" : "bg-slate-200"}`}>
+				className={`relative h-7 w-13 rounded-full transition-colors ${value ? "bg-blue-800" : "bg-slate-200"}`}>
 				<span
-					className={`absolute top-0.5 h-6 w-6 rounded-full bg-white shadow transition-transform ${value ? "translate-x-5" : "translate-x-0.5"}`}
+					className={`absolute top-0.5 h-6 w-6 left-0.5 rounded-full bg-white shadow transition-transform ${value ? "translate-x-6" : "translate-x-0"}`}
 				/>
 			</button>
 		);
@@ -1298,7 +1300,7 @@ export default function Home() {
 
 			{/* table */}
 			<div className="relative min-h-0 flex-1">
-				{activeMaterial === "frp" ? (
+				{activeMaterial ? (
 					<DndContext
 						sensors={sensors}
 						collisionDetection={closestCenter}
@@ -1316,14 +1318,14 @@ export default function Home() {
 												<SortableFrpRow
 													key={item.id}
 													frp={item}
-													rowClass={getRowClass("frp", item, index)}
-													onSelect={() => setSelectedIds((prev) => ({ ...prev, frp: item.id }))}
-													onDeselect={() => setSelectedIds((prev) => ({ ...prev, frp: prev.frp === item.id ? null : prev.frp }))}
+													rowClass={getRowClass(activeMaterial, item, index)}
+													onSelect={() => setSelectedIds((prev) => ({ ...prev, [activeMaterial]: item.id }))}
+													onDeselect={() => setSelectedIds((prev) => ({ ...prev, [activeMaterial]: prev[activeMaterial] === item.id ? null : prev[activeMaterial] }))}
 													onRowRef={(node) => { if (node) rowRefs.current.set(item.id, node); else rowRefs.current.delete(item.id); }}>
 													{renderTableCells(item)}
 												</SortableFrpRow>
 											))}
-											<tr><td colSpan={8} className="h-16" /></tr>
+											<tr><td colSpan={activeMaterial === "coatedFrp" ? 6 : 8} className="h-16" /></tr>
 										</tbody>
 									</SortableContext>
 								) : (
@@ -1334,7 +1336,7 @@ export default function Home() {
 						<DragOverlay modifiers={[restrictToWindowEdges]}>
 							{activeDragId ? (
 								<div className="w-screen border border-blue-300 bg-white/95 px-3 py-2 text-sm font-medium text-slate-900 shadow-xl backdrop-blur">
-									<div className="truncate text-center">{stocks.frp.find((i) => i.id === activeDragId)?.drumNumber || "FRP"}</div>
+									<div className="truncate text-center">{stocks[activeMaterial]?.find((i) => i.id === activeDragId)?.drumNumber || matLabel}</div>
 								</div>
 							) : null}
 						</DragOverlay>
@@ -1343,19 +1345,7 @@ export default function Home() {
 					<div className="h-full overflow-auto">
 						<table className="min-w-full border-separate border-spacing-0 text-left text-sm">
 							<thead className="sticky top-0 z-40">{renderTableHead()}</thead>
-							<tbody>
-								{activeItems.length > 0
-									? activeItems.map((item, index) => (
-											<tr
-												key={item.id}
-												className={getRowClass(activeMaterial, item, index)}
-												onClick={() => setSelectedIds((prev) => ({ ...prev, [activeMaterial]: prev[activeMaterial] === item.id ? null : item.id }))}>
-												{renderTableCells(item)}
-											</tr>
-										))
-									: renderEmptyRow()}
-								{activeItems.length > 0 && <tr><td colSpan={8} className="h-16" /></tr>}
-							</tbody>
+							<tbody>{renderEmptyRow()}</tbody>
 						</table>
 					</div>
 				)}
