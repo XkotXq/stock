@@ -300,8 +300,55 @@ async function downloadXlsx({ fileName, sheets }) {
 }
 
 
-function SortableFrpRow({ frp, rowClass, onSelect, onDeselect, onRowRef, children }) {
-	const { setNodeRef, attributes, listeners, transform, transition, isDragging } = useSortable({ id: frp.id });
+const DEFAULT_SEARCH_FILTERS = {
+	frp: { item: "", diameter: "", type: "all", location: "", mmc: "all", drum: "" },
+	coatedFrp: { diameter: "", location: "", drum: "" },
+	filler: { diameter: "", color: "all", location: "all", incendiary: "all", drum: "" },
+};
+
+function textIncludes(value, needle) {
+	const n = String(needle ?? "").trim().toLowerCase();
+	if (!n) return true;
+	return String(value ?? "").toLowerCase().includes(n);
+}
+
+function matchesSearchFilters(material, item, filters) {
+	const f = filters?.[material];
+	if (!f) return true;
+	if (material === "frp") {
+		if (!textIncludes(item.itemNumber, f.item) && !textIncludes(item.frpNumber, f.item)) return false;
+		if (!textIncludes(item.frpLabel || item.diameter, f.diameter)) return false;
+		if (f.type !== "all" && item.type !== f.type) return false;
+		if (!textIncludes(item.location, f.location)) return false;
+		if (f.mmc !== "all" && Boolean(item.mmc) !== (f.mmc === "yes")) return false;
+		if (!textIncludes(item.drumNumber, f.drum)) return false;
+		return true;
+	}
+	if (material === "coatedFrp") {
+		if (!textIncludes(item.diameter, f.diameter)) return false;
+		if (!textIncludes(item.location, f.location)) return false;
+		if (!textIncludes(item.drumNumber, f.drum)) return false;
+		return true;
+	}
+	if (material === "filler") {
+		if (!textIncludes(item.diameter, f.diameter)) return false;
+		if (f.color !== "all" && item.color !== f.color) return false;
+		if (f.location !== "all" && item.location !== f.location) return false;
+		if (f.incendiary !== "all" && Boolean(item.isincendiary) !== (f.incendiary === "yes")) return false;
+		if (!textIncludes(item.drumNumber, f.drum)) return false;
+		return true;
+	}
+	return true;
+}
+
+function hasActiveSearchFilters(material, filters) {
+	const f = filters?.[material];
+	if (!f) return false;
+	return Object.values(f).some((v) => v !== "" && v !== "all");
+}
+
+function SortableFrpRow({ frp, rowClass, onSelect, onDeselect, onRowRef, disabled, children }) {
+	const { setNodeRef, attributes, listeners, transform, transition, isDragging } = useSortable({ id: frp.id, disabled });
 	const style = { transform: CSS.Transform.toString(transform), transition: transition || "transform 240ms ease" };
 	return (
 		<tr
@@ -311,7 +358,7 @@ function SortableFrpRow({ frp, rowClass, onSelect, onDeselect, onRowRef, childre
 			onClick={onSelect}
 			onDoubleClick={onDeselect}
 			{...attributes}
-			{...listeners}>
+			{...(disabled ? {} : listeners)}>
 			{children}
 		</tr>
 	);
@@ -431,6 +478,9 @@ export default function Home() {
 
 	const [activeDragId, setActiveDragId] = useState(null);
 	const [itemIdDisplayMode, setItemIdDisplayMode] = useState("full");
+	const [dragLocked, setDragLocked] = useState({ frp: false, coatedFrp: false, filler: false });
+	const [searchOpen, setSearchOpen] = useState(false);
+	const [searchFilters, setSearchFilters] = useState(DEFAULT_SEARCH_FILTERS);
 
 	const tableScrollRef = useRef(null);
 	const rowRefs = useRef(new Map());
@@ -468,6 +518,12 @@ export default function Home() {
 		[activeMaterial, statusMap],
 	);
 	const isStockCompleted = activeMaterial ? Boolean(stockCompleted[activeMaterial]) : false;
+	const isDragLocked = isStockCompleted || Boolean(activeMaterial && dragLocked[activeMaterial]);
+	const isSearchActive = Boolean(activeMaterial && hasActiveSearchFilters(activeMaterial, searchFilters));
+	const displayedItems = useMemo(
+		() => (activeMaterial ? activeItems.filter((item) => matchesSearchFilters(activeMaterial, item, searchFilters)) : []),
+		[activeMaterial, activeItems, searchFilters],
+	);
 	const allStatusesMarked =
 		Boolean(activeMaterial) &&
 		!isStockCompleted &&
@@ -604,15 +660,13 @@ export default function Home() {
 		const err = validateDraft(sheetMaterial, sheetDraft);
 		if (err) { setSheetError(err); return; }
 		const drum = String(sheetDraft.drumNumber ?? "").trim();
-		if (drum && allDrums().some((i) => String(i.drumNumber ?? "").trim() === drum)) {
-			setSheetError("Ten numer szpuli już istnieje. Musi być unikalny.");
-			return;
-		}
+		const isDuplicateDrum = drum && allDrums().some((i) => String(i.drumNumber ?? "").trim() === drum);
 		const newId = createId();
 		const entry = buildEntry(sheetMaterial, sheetDraft, newId);
 		if (entry.location) setLastLocation(entry.location);
 
 		const mat = sheetMaterial;
+		const hadSelection = Boolean(selectedIds[mat]);
 		setStocks((prev) => {
 			const list = prev[mat] ?? [];
 			const selId = selectedIds[mat];
@@ -622,9 +676,10 @@ export default function Home() {
 			next.splice(idx, 0, entry);
 			return { ...prev, [mat]: next };
 		});
-		setSelectedIds((prev) => ({ ...prev, [mat]: newId }));
+		if (hadSelection) setSelectedIds((prev) => ({ ...prev, [mat]: newId }));
 		closeSheet();
 		requestAnimationFrame(() => scrollRowIntoView(newId));
+		if (isDuplicateDrum) window.alert(`Numer szpuli "${drum}" już istnieje. Dodano mimo to.`);
 	}
 
 	function handleEdit() {
@@ -742,7 +797,7 @@ export default function Home() {
 			const frpItems = yesItems.filter((i) => !resolveFrpMmc(i, frpDb));
 			const mmcItems = yesItems.filter((i) => resolveFrpMmc(i, frpDb));
 			sheets = [
-				{ sheetName: "FRP", headers: ["ITEM", "DIAMETER / ŚREDNICA", "LENGTH / DŁUGOŚĆ [KM]", "XB / Z", "DRUM NUMBER / NR SZPULI", "LOCALIZATION / LOKALIZACJA", "REMARKS / UWAGI"], rows: frpItems.map((i) => [String(i.frpNumber ?? i.itemNumber ?? ""), resolveFrpFullName(i, frpDb), formatLengthKmExport(i.length), String(i.type ?? ""), String(i.drumNumber ?? ""), String(i.location ?? ""), String(i.remark ?? "")]) },
+				{ sheetName: "FRP", headers: ["ITEM", "DIAMETER / ŚREDNICA", "LENGTH / DŁUGOŚĆ [KM]", "DRUM NUMBER / NR SZPULI", "XB / Z", "LOCALIZATION / LOKALIZACJA", "REMARKS / UWAGI"], rows: frpItems.map((i) => [String(i.frpNumber ?? i.itemNumber ?? ""), resolveFrpFullName(i, frpDb), formatLengthKmExport(i.length), String(i.drumNumber ?? ""), String(i.type ?? ""), String(i.location ?? ""), String(i.remark ?? "")]) },
 				{ sheetName: "FRP MMC", headers: ["ITEM", "DIAMETER / ŚREDNICA", "LENGTH / DŁUGOŚĆ [KM]", "DRUM NUMBER / NR SZPULI", "LOCALIZATION / LOKALIZACJA", "REMARKS / UWAGI"], rows: mmcItems.map((i) => [String(i.frpNumber ?? i.itemNumber ?? ""), resolveFrpFullName(i, frpDb), formatLengthKmExport(i.length), String(i.drumNumber ?? ""), String(i.location ?? ""), String(i.remark ?? "")]) },
 			];
 			summary = `Jest: ${finishedYesCount}, Brak: ${finishedNoCount}.\nWyeksportowano: ${frpItems.length} FRP i ${mmcItems.length} FRP MMC.`;
@@ -958,6 +1013,16 @@ export default function Home() {
 
 	function scrollRowIntoView(id) {
 		rowRefs.current.get(id)?.scrollIntoView({ behavior: "smooth", block: "center" });
+	}
+
+	function updateSearchFilter(key, value) {
+		if (!activeMaterial) return;
+		setSearchFilters((prev) => ({ ...prev, [activeMaterial]: { ...prev[activeMaterial], [key]: value } }));
+	}
+
+	function clearSearchFilters() {
+		if (!activeMaterial) return;
+		setSearchFilters((prev) => ({ ...prev, [activeMaterial]: DEFAULT_SEARCH_FILTERS[activeMaterial] }));
 	}
 
 
@@ -1280,11 +1345,82 @@ export default function Home() {
 		);
 	}
 
+	function renderSearchPanel() {
+		if (!activeMaterial) return null;
+		const f = searchFilters[activeMaterial];
+		const fieldCls = "rounded-md border border-slate-200 bg-white px-2.5 py-1.5 text-sm text-slate-900 outline-none transition focus:border-blue-500";
+		const labelCls = "flex flex-col gap-1 text-xs font-semibold text-slate-500";
+		return (
+			<div className="flex flex-wrap items-end gap-3 border-b border-slate-200 bg-slate-50 px-3 py-2.5">
+				{activeMaterial === "frp" && (
+					<>
+						<label className={labelCls}>item<input value={f.item} onChange={(e) => updateSearchFilter("item", e.target.value)} className={`${fieldCls} w-28`} placeholder="np. 395" /></label>
+						<label className={labelCls}>średnica<input value={f.diameter} onChange={(e) => updateSearchFilter("diameter", e.target.value)} className={`${fieldCls} w-24`} placeholder="np. 2.2" /></label>
+						<label className={labelCls}>XB/Z
+							<select value={f.type} onChange={(e) => updateSearchFilter("type", e.target.value)} className={fieldCls}>
+								<option value="all">Wszystkie</option>
+								<option value="XB">XB</option>
+								<option value="Z">Z</option>
+							</select>
+						</label>
+						<label className={labelCls}>MMC
+							<select value={f.mmc} onChange={(e) => updateSearchFilter("mmc", e.target.value)} className={fieldCls}>
+								<option value="all">Wszystkie</option>
+								<option value="yes">Tak</option>
+								<option value="no">Nie</option>
+							</select>
+						</label>
+						<label className={labelCls}>nr szpuli<input value={f.drum} onChange={(e) => updateSearchFilter("drum", e.target.value)} className={`${fieldCls} w-28`} /></label>
+						<label className={labelCls}>lokalizacja<input value={f.location} onChange={(e) => updateSearchFilter("location", e.target.value)} className={`${fieldCls} w-32`} /></label>
+					</>
+				)}
+				{activeMaterial === "coatedFrp" && (
+					<>
+						<label className={labelCls}>średnica<input value={f.diameter} onChange={(e) => updateSearchFilter("diameter", e.target.value)} className={`${fieldCls} w-24`} placeholder="np. 1.6" /></label>
+						<label className={labelCls}>nr szpuli<input value={f.drum} onChange={(e) => updateSearchFilter("drum", e.target.value)} className={`${fieldCls} w-28`} /></label>
+						<label className={labelCls}>lokalizacja<input value={f.location} onChange={(e) => updateSearchFilter("location", e.target.value)} className={`${fieldCls} w-32`} /></label>
+					</>
+				)}
+				{activeMaterial === "filler" && (
+					<>
+						<label className={labelCls}>średnica<input value={f.diameter} onChange={(e) => updateSearchFilter("diameter", e.target.value)} className={`${fieldCls} w-24`} /></label>
+						<label className={labelCls}>kolor
+							<select value={f.color} onChange={(e) => updateSearchFilter("color", e.target.value)} className={fieldCls}>
+								<option value="all">Wszystkie</option>
+								<option value="GRAY">GRAY</option>
+								<option value="WHITE">WHITE</option>
+								<option value="BLACK">BLACK</option>
+							</select>
+						</label>
+						<label className={labelCls}>nr szpuli<input value={f.drum} onChange={(e) => updateSearchFilter("drum", e.target.value)} className={`${fieldCls} w-28`} /></label>
+						<label className={labelCls}>niepalny
+							<select value={f.incendiary} onChange={(e) => updateSearchFilter("incendiary", e.target.value)} className={fieldCls}>
+								<option value="all">Wszystkie</option>
+								<option value="yes">Tak</option>
+								<option value="no">Nie</option>
+							</select>
+						</label>
+						<label className={labelCls}>lokalizacja
+							<select value={f.location} onChange={(e) => updateSearchFilter("location", e.target.value)} className={fieldCls}>
+								<option value="all">Wszystkie</option>
+								<option value="PRZED">PRZED</option>
+								<option value="ZA">ZA</option>
+							</select>
+						</label>
+					</>
+				)}
+				{isSearchActive && (
+					<button type="button" onClick={clearSearchFilters} className="rounded-md bg-slate-200 px-3 py-1.5 text-xs font-semibold text-slate-700 transition hover:bg-slate-300">Wyczyść filtry</button>
+				)}
+			</div>
+		);
+	}
+
 	function renderEmptyRow() {
 		const cols = activeMaterial === "frp" ? 8 : activeMaterial === "coatedFrp" ? 6 : 8;
 		return (
 			<tr><td colSpan={cols} className="px-4 py-8 text-center text-sm font-semibold text-slate-500">
-				Brak pozycji. Dodaj pierwszy wpis, żeby zobaczyć listę.
+				{isSearchActive ? "Brak wyników dla wybranych filtrów." : "Brak pozycji. Dodaj pierwszy wpis, żeby zobaczyć listę."}
 			</td></tr>
 		);
 	}
@@ -1295,8 +1431,37 @@ export default function Home() {
 			<div className="flex items-center justify-between border-b border-slate-200 bg-white px-3 py-2 shadow-sm">
 				<button onClick={() => setActiveMaterial(null)} className="rounded-full bg-slate-100 px-4 py-1.5 text-sm font-semibold text-slate-800 transition hover:bg-slate-200">← Wstecz</button>
 				<span className="text-xl font-extrabold text-slate-900">{matLabel}</span>
-				<span className="rounded-full bg-slate-100 px-3 py-1.5 text-sm font-semibold text-slate-800">{activeItems.length} poz.</span>
+				<div className="flex items-center gap-2">
+					<span className="rounded-full bg-slate-100 px-3 py-1.5 text-sm font-semibold text-slate-800">{isSearchActive ? `${displayedItems.length}/${activeItems.length}` : activeItems.length} poz.</span>
+					{activeMaterial && (
+						<button
+							type="button"
+							onClick={() => setSearchOpen((v) => !v)}
+							aria-label={searchOpen ? "Ukryj wyszukiwarkę" : "Pokaż wyszukiwarkę"}
+							title={searchOpen ? "Ukryj wyszukiwarkę" : "Pokaż wyszukiwarkę"}
+							className={`rounded-full p-1.5 transition ${isSearchActive ? "bg-amber-100 text-amber-700 hover:bg-amber-200" : searchOpen ? "bg-blue-100 text-blue-700 hover:bg-blue-200" : "bg-slate-100 text-slate-600 hover:bg-slate-200"}`}>
+							<svg width="18" height="18" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><circle cx="11" cy="11" r="7" stroke="currentColor" strokeWidth="2" /><path d="M21 21L16.65 16.65" stroke="currentColor" strokeWidth="2" strokeLinecap="round" /></svg>
+						</button>
+					)}
+					{activeMaterial && (
+						<button
+							type="button"
+							onClick={() => setDragLocked((prev) => ({ ...prev, [activeMaterial]: !prev[activeMaterial] }))}
+							disabled={isStockCompleted}
+							aria-label={isDragLocked ? "Odblokuj przestawianie" : "Zablokuj przestawianie"}
+							title={isDragLocked ? "Odblokuj przestawianie" : "Zablokuj przestawianie"}
+							className={`rounded-full p-1.5 transition ${isStockCompleted ? "cursor-not-allowed text-slate-300" : isDragLocked ? "bg-amber-100 text-amber-700 hover:bg-amber-200" : "bg-slate-100 text-slate-600 hover:bg-slate-200"}`}>
+							{isDragLocked ? (
+								<svg width="18" height="18" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><rect x="5" y="11" width="14" height="9" rx="2" stroke="currentColor" strokeWidth="2" /><path d="M8 11V7a4 4 0 018 0v4" stroke="currentColor" strokeWidth="2" /></svg>
+							) : (
+								<svg width="18" height="18" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><rect x="5" y="11" width="14" height="9" rx="2" stroke="currentColor" strokeWidth="2" /><path d="M8 11V7a4 4 0 017.446-2" stroke="currentColor" strokeWidth="2" strokeLinecap="round" /></svg>
+							)}
+						</button>
+					)}
+				</div>
 			</div>
+
+			{searchOpen && renderSearchPanel()}
 
 			{/* table */}
 			<div className="relative min-h-0 flex-1">
@@ -1311,14 +1476,15 @@ export default function Home() {
 						<div ref={tableScrollRef} className="h-full overflow-auto">
 							<table className="min-w-full border-separate border-spacing-0 text-left text-sm">
 								<thead className="sticky top-0 z-40">{renderTableHead()}</thead>
-								{activeItems.length > 0 ? (
-									<SortableContext items={activeItems.map((i) => i.id)} strategy={verticalListSortingStrategy}>
+								{displayedItems.length > 0 ? (
+									<SortableContext items={displayedItems.map((i) => i.id)} strategy={verticalListSortingStrategy}>
 										<tbody>
-											{activeItems.map((item, index) => (
+											{displayedItems.map((item, index) => (
 												<SortableFrpRow
 													key={item.id}
 													frp={item}
 													rowClass={getRowClass(activeMaterial, item, index)}
+													disabled={isDragLocked}
 													onSelect={() => setSelectedIds((prev) => ({ ...prev, [activeMaterial]: item.id }))}
 													onDeselect={() => setSelectedIds((prev) => ({ ...prev, [activeMaterial]: prev[activeMaterial] === item.id ? null : prev[activeMaterial] }))}
 													onRowRef={(node) => { if (node) rowRefs.current.set(item.id, node); else rowRefs.current.delete(item.id); }}>
